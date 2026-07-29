@@ -1,17 +1,34 @@
 import * as THREE from "three";
+import { GUI } from "lil-gui";
 import { startCamera, createFaceLandmarker } from "./app.js";
 
-// 設定・状態管理
-const mirrored = true;
+// DOM 要素
 const video = document.getElementById("video");
 const canvas = document.getElementById("canvas");
+
+// --- 調整用パラメータ設定 ---
+const params = {
+  filterPath: "/assets/mask.png", // 現在のフィルター画像
+  xOffsetNorm: 0.05,             // 横位置補正
+  yOffsetNorm: -0.05,            // 縦位置補正
+  baseScale: 0.1,                // 基本スケール
+  depthFactor: 0.1,              // 奥行き感（顔幅との係数）
+  mirrored: true                 // 鏡像反転フラグ
+};
+
+// 選択可能なフィルターリスト（public/assets/ 配下に画像を置けば増やせます）
+const filterOptions = {
+  "イチゴフレーム (mask.png)": "/assets/mask.png"
+  // 例: "ネコミミ": "/assets/cat_ears.png",
+  // 例: "メガネ": "/assets/glasses.png"
+};
 
 // Three.js 用一時ベクトル
 const tmpVec = new THREE.Vector3();
 
 // --- Three.js セットアップ ---
 const renderer = new THREE.WebGLRenderer({ canvas, alpha: true });
-renderer.setClearColor(0x000000, 0); // 透明背景
+renderer.setClearColor(0x000000, 0);
 renderer.setPixelRatio(window.devicePixelRatio || 1);
 renderer.setSize(Math.max(1, canvas.width || 1), Math.max(1, canvas.height || 1), false);
 
@@ -19,8 +36,11 @@ const scene = new THREE.Scene();
 const camera3d = new THREE.PerspectiveCamera(70, 1, 0.01, 10);
 camera3d.position.z = 1;
 
-// マスクメッシュの生成
-const texture = new THREE.TextureLoader().load("/assets/mask.png", (tex) => {
+// テクスチャローダー
+const textureLoader = new THREE.TextureLoader();
+
+// 初回マスクメッシュ生成
+const texture = textureLoader.load(params.filterPath, (tex) => {
   tex.flipY = false;
 });
 const plane = new THREE.Mesh(
@@ -29,16 +49,47 @@ const plane = new THREE.Mesh(
 );
 scene.add(plane);
 
-// 初期可視性とスケール
 plane.visible = true;
 plane.position.set(0, 0, 0);
 plane.scale.set(0.2, 0.2, 1);
+
+// --- lil-gui のセットアップ ---
+const gui = new GUI({ title: "AR Filter Controls" });
+
+// 1. フィルター切替
+gui.add(params, "filterPath", filterOptions)
+  .name("Filter")
+  .onChange((path) => {
+    textureLoader.load(path, (newTex) => {
+      newTex.flipY = false;
+      plane.material.map = newTex;
+      plane.material.needsUpdate = true;
+    });
+  });
+
+// 2. 位置・サイズ・奥行きパラメータ
+const folderTransform = gui.addFolder("Position & Scale");
+folderTransform.add(params, "xOffsetNorm", -0.5, 0.5, 0.01).name("X Offset");
+folderTransform.add(params, "yOffsetNorm", -0.5, 0.5, 0.01).name("Y Offset");
+folderTransform.add(params, "baseScale", 0.01, 1.0, 0.01).name("Scale");
+folderTransform.add(params, "depthFactor", 0.0, 1.0, 0.01).name("Depth Factor");
+
+// 3. 鏡像切り替え（カメラ映像の反転と連動）
+gui.add(params, "mirrored")
+  .name("Mirror Mode")
+  .onChange((isMirrored) => {
+    if (isMirrored) {
+      video.style.transform = "scaleX(-1)";
+    } else {
+      video.style.transform = "scaleX(1)";
+    }
+  });
 
 /**
  * 鏡像補正関数
  */
 function correctedX(x) {
-  return mirrored ? 1 - x : x;
+  return params.mirrored ? 1 - x : x;
 }
 
 /**
@@ -80,7 +131,6 @@ function syncCanvasSizeToVideo(videoEl, canvasEl, rendererEl, cameraEl) {
 function landmarkToWorld(xNorm, yNorm, z = 0.5, cameraEl) {
   const xCorr = correctedX(xNorm);
 
-  // NDC（Normalized Device Coordinates: -1..1）変換
   const ndcX = xCorr * 2 - 1;
   const ndcY = -(yNorm * 2 - 1);
 
@@ -101,19 +151,15 @@ async function main() {
   video.playsInline = true;
   await video.play().catch((e) => console.warn("video.play() failed", e));
 
-  // 初回同期
   syncCanvasSizeToVideo(video, canvas, renderer, camera3d);
 
-  // MediaPipe 初期化
   const faceLandmarker = await createFaceLandmarker();
   console.log("main: faceLandmarker ready");
 
-  // リサイズイベント登録
   window.addEventListener("resize", () =>
     syncCanvasSizeToVideo(video, canvas, renderer, camera3d)
   );
 
-  // 描画ループ
   async function renderLoop(flm) {
     syncCanvasSizeToVideo(video, canvas, renderer, camera3d);
 
@@ -125,35 +171,28 @@ async function main() {
         const leftEye = lm[33];
         const rightEye = lm[263];
 
-        // 目の左右（補正済み）
         const lx = correctedX(leftEye.x);
         const rx = correctedX(rightEye.x);
 
-        // 顔の横幅（0..1）
         const faceWidthNorm = Math.abs(rx - lx);
 
-        // 深度設定
-        const depthFactor = 0.1;
-        const zDepth = THREE.MathUtils.clamp(0.5 - faceWidthNorm * depthFactor, 0.05, 0.95);
+        // GUI パラメータをリアルタイム反映
+        const zDepth = THREE.MathUtils.clamp(
+          0.5 - faceWidthNorm * params.depthFactor,
+          0.05,
+          0.95
+        );
 
-        // 位置補正オフセット
-        const xOffsetNorm = 0.05;
-        const yOffsetNorm = -0.05;
-
-        // ワールド位置へ変換して更新
-        const adjNoseX = nose.x + xOffsetNorm;
-        const adjNoseY = nose.y + yOffsetNorm;
+        const adjNoseX = nose.x + params.xOffsetNorm;
+        const adjNoseY = nose.y + params.yOffsetNorm;
         const worldPos = landmarkToWorld(adjNoseX, adjNoseY, zDepth, camera3d);
         plane.position.copy(worldPos);
 
-        // 回転（目のラインに合わせる）
         const dx = rx - lx;
         const dy = rightEye.y - leftEye.y;
         plane.rotation.z = -Math.atan2(dy, dx);
 
-        // スケール設定
-        const baseScale = 0.1;
-        const finalScale = Math.max(0.02, faceWidthNorm * baseScale);
+        const finalScale = Math.max(0.02, faceWidthNorm * params.baseScale);
         plane.scale.set(finalScale, finalScale, 1);
 
         plane.visible = true;
