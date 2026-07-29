@@ -1,20 +1,15 @@
-import {
-  FaceLandmarker,
-  FilesetResolver
-} from "@mediapipe/tasks-vision";
-
 import * as THREE from "three";
 import { startCamera, createFaceLandmarker } from "./app.js";
 
-// 鏡像表示と補正
+// 設定・状態管理
 const mirrored = true;
 const video = document.getElementById("video");
 const canvas = document.getElementById("canvas");
 
-// Three.js 一時ベクタ
+// Three.js 用一時ベクトル
 const tmpVec = new THREE.Vector3();
 
-// Three.js セットアップ（初期サイズは後で同期）
+// --- Three.js セットアップ ---
 const renderer = new THREE.WebGLRenderer({ canvas, alpha: true });
 renderer.setClearColor(0x000000, 0); // 透明背景
 renderer.setPixelRatio(window.devicePixelRatio || 1);
@@ -24,7 +19,7 @@ const scene = new THREE.Scene();
 const camera3d = new THREE.PerspectiveCamera(70, 1, 0.01, 10);
 camera3d.position.z = 1;
 
-// マスク画像（上下反転を補正）
+// マスクメッシュの生成
 const texture = new THREE.TextureLoader().load("/assets/mask.png", (tex) => {
   tex.flipY = false;
 });
@@ -34,19 +29,21 @@ const plane = new THREE.Mesh(
 );
 scene.add(plane);
 
-// 初期可視化設定
+// 初期可視性とスケール
 plane.visible = true;
 plane.position.set(0, 0, 0);
 plane.scale.set(0.2, 0.2, 1);
 
-// ミラー補正関数
+/**
+ * 鏡像補正関数
+ */
 function correctedX(x) {
   return mirrored ? 1 - x : x;
 }
 
-/*
-  安全な canvas 同期
-*/
+/**
+ * 安全な Canvas サイズ同期
+ */
 let _lastCanvasW = 0;
 let _lastCanvasH = 0;
 function syncCanvasSizeToVideo(videoEl, canvasEl, rendererEl, cameraEl) {
@@ -73,43 +70,36 @@ function syncCanvasSizeToVideo(videoEl, canvasEl, rendererEl, cameraEl) {
   cameraEl.aspect = newW / newH;
   cameraEl.updateProjectionMatrix();
 
-  canvasEl.style.width = '100%';
-  canvasEl.style.height = '100%';
+  canvasEl.style.width = "100%";
+  canvasEl.style.height = "100%";
 }
 
-/*
-  landmark -> Three.js world
-  - ここでは canvas の内部ピクセル（canvas.width/height）を使って
-    スクリーンピクセルに変換し、NDC を作って unproject する方式。
-  - z は呼び出し側で動的に決める（顔幅に応じた深度）。
-*/
-function landmarkToWorld(xNorm, yNorm, z = 0.5, canvasEl, cameraEl) {
+/**
+ * 正規化座標 (0..1) -> Three.js 3D ワールド座標変換
+ */
+function landmarkToWorld(xNorm, yNorm, z = 0.5, cameraEl) {
   const xCorr = correctedX(xNorm);
 
-  // スクリーン（表示）ピクセル位置を計算
-  // 注意: canvasEl.width/height は内部ピクセル数（dpr考慮済み）
-  const sx = xCorr * canvasEl.clientWidth;
-  const sy = yNorm * canvasEl.clientHeight;
-
-  // NDC に変換（内部ピクセルではなく CSS 表示サイズを基準に）
-  const ndcX = (sx / canvasEl.clientWidth) * 2 - 1;
-  const ndcY = -((sy / canvasEl.clientHeight) * 2 - 1);
+  // NDC（Normalized Device Coordinates: -1..1）変換
+  const ndcX = xCorr * 2 - 1;
+  const ndcY = -(yNorm * 2 - 1);
 
   tmpVec.set(ndcX, ndcY, z);
   tmpVec.unproject(cameraEl);
   return tmpVec.clone();
 }
 
+/**
+ * メイン処理
+ */
 async function main() {
-  // カメラ開始（高解像度を要求するよう app.js を修正している想定）
   await startCamera(video);
 
-  // 強制表示と再生確保
-  video.style.display = 'block';
-  video.removeAttribute('hidden');
+  video.style.display = "block";
+  video.removeAttribute("hidden");
   video.muted = true;
   video.playsInline = true;
-  await video.play().catch(e => console.warn('video.play() failed', e));
+  await video.play().catch((e) => console.warn("video.play() failed", e));
 
   // 初回同期
   syncCanvasSizeToVideo(video, canvas, renderer, camera3d);
@@ -118,12 +108,13 @@ async function main() {
   const faceLandmarker = await createFaceLandmarker();
   console.log("main: faceLandmarker ready");
 
-  // リサイズイベントで再同期
-  window.addEventListener('resize', () => syncCanvasSizeToVideo(video, canvas, renderer, camera3d));
+  // リサイズイベント登録
+  window.addEventListener("resize", () =>
+    syncCanvasSizeToVideo(video, canvas, renderer, camera3d)
+  );
 
   // 描画ループ
   async function renderLoop(flm) {
-    // 毎フレーム安全に同期
     syncCanvasSizeToVideo(video, canvas, renderer, camera3d);
 
     try {
@@ -135,71 +126,37 @@ async function main() {
         const rightEye = lm[263];
 
         // 目の左右（補正済み）
-        // const lx = correctedX(leftEye.x);
-        // const rx = correctedX(rightEye.x);
-
-        // // 正規化幅（0..1）
-        // const faceWidthNorm = Math.abs(rx - lx);
-
-        // // 深度（顔幅に応じて近づける）
-        // // 調整パラメータ depthFactor で見た目を変える
-        // const depthFactor = 0.45; // 0.2〜0.6 を試す
-        // // z は 0..1 の範囲で与える（unproject の z）
-        // const zDepth = THREE.MathUtils.clamp(0.5 - faceWidthNorm * depthFactor, 0.05, 0.95);
-
-        // // 位置（鼻中心） — canvas を渡して正確にスクリーン→NDC変換
-        // const worldPos = landmarkToWorld(nose.x, nose.y, zDepth, canvas, camera3d);
-        // plane.position.copy(worldPos);
-
-        // // 回転（目のライン）
-        // const dx = rx - lx;
-        // const dy = rightEye.y - leftEye.y;
-        // plane.rotation.z = -Math.atan2(dy, dx);
-
-        // // スケール（正規化幅ベース、最小値を設定）
-        // const baseScale = 0.55; // 見た目調整用（0.3〜0.8 を試す）
-        // const finalScale = Math.max(0.05, faceWidthNorm * baseScale);
-        // plane.scale.set(finalScale, finalScale, 1);
-
-        // plane.visible = true;
-        // 目の左右（補正済み）
         const lx = correctedX(leftEye.x);
         const rx = correctedX(rightEye.x);
 
-        // 正規化幅（0..1）
+        // 顔の横幅（0..1）
         const faceWidthNorm = Math.abs(rx - lx);
 
-        // 深度（顔幅に応じて近づける）
-        const depthFactor = 0.1; // 必要なら 0.2〜0.6 を試す
+        // 深度設定
+        const depthFactor = 0.1;
         const zDepth = THREE.MathUtils.clamp(0.5 - faceWidthNorm * depthFactor, 0.05, 0.95);
 
-        // --- 横オフセット（正規化座標） ---
-        // 正の値で右へ、負の値で左へ移動します。
-        // 今回は「少し左寄り」なので右へ寄せるため正の値を入れてあります。
-        const xOffsetNorm = 0.05; // 試す値: 0.01, 0.02, 0.03
-        const yOffsetNorm = -0.05; // 必要なら上下補正（正で下、負で上）
+        // 位置補正オフセット
+        const xOffsetNorm = 0.05;
+        const yOffsetNorm = -0.05;
 
-        // 鼻位置にオフセットを加えて world に変換
+        // ワールド位置へ変換して更新
         const adjNoseX = nose.x + xOffsetNorm;
         const adjNoseY = nose.y + yOffsetNorm;
-        const worldPos = landmarkToWorld(adjNoseX, adjNoseY, zDepth, canvas, camera3d);
+        const worldPos = landmarkToWorld(adjNoseX, adjNoseY, zDepth, camera3d);
         plane.position.copy(worldPos);
 
-        // 回転（目のライン）
+        // 回転（目のラインに合わせる）
         const dx = rx - lx;
         const dy = rightEye.y - leftEye.y;
         plane.rotation.z = -Math.atan2(dy, dx);
 
-        // スケール（正規化幅ベース、少し小さめに）
-        const baseScale = 0.1; // 変更点：0.55 -> 0.48（小さくする）
+        // スケール設定
+        const baseScale = 0.1;
         const finalScale = Math.max(0.02, faceWidthNorm * baseScale);
         plane.scale.set(finalScale, finalScale, 1);
 
         plane.visible = true;
-
-      } else {
-        // 顔が検出されないときは非表示にするか、前フレーム位置を維持する
-        // plane.visible = false;
       }
     } catch (e) {
       console.error("renderLoop error", e);
@@ -209,8 +166,7 @@ async function main() {
     requestAnimationFrame(() => renderLoop(flm));
   }
 
-  // ループ開始
   renderLoop(faceLandmarker);
 }
 
-main().catch(e => console.error("main error", e));
+main().catch((e) => console.error("main error", e));
