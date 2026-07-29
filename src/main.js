@@ -191,7 +191,7 @@ async function main() {
         plane.rotation.z = -Math.atan2(dy, dx);
 
         // スケール（正規化幅ベース、少し小さめに）
-        const baseScale = 0.2; // 変更点：0.55 -> 0.48（小さくする）
+        const baseScale = 0.1; // 変更点：0.55 -> 0.48（小さくする）
         const finalScale = Math.max(0.02, faceWidthNorm * baseScale);
         plane.scale.set(finalScale, finalScale, 1);
 
