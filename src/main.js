@@ -81,33 +81,48 @@ gui.add(params, "mirrored")
  */
 let _lastCanvasW = 0;
 let _lastCanvasH = 0;
+let _lastDpr = 0;
+
 function syncCanvasSizeToVideo(videoEl, canvasEl, rendererEl, cameraEl) {
   const displayWidth = Math.round(videoEl.clientWidth || 0);
   const displayHeight = Math.round(videoEl.clientHeight || 0);
 
-  if (!displayWidth || !displayHeight) return;
+  if (displayWidth <= 0 || displayHeight <= 0) {
+    return;
+  }
 
-  const dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
-  const newW = Math.max(1, Math.round(displayWidth * dpr));
-  const newH = Math.max(1, Math.round(displayHeight * dpr));
+  // スマホの負荷を抑えるため、DPRは最大2にする
+  const dpr = Math.min(
+    Math.max(window.devicePixelRatio || 1, 1),
+    2
+  );
 
-  if (newW === _lastCanvasW && newH === _lastCanvasH) return;
+  if (
+    displayWidth === _lastCanvasW &&
+    displayHeight === _lastCanvasH &&
+    dpr === _lastDpr
+  ) {
+    return;
+  }
 
-  _lastCanvasW = newW;
-  _lastCanvasH = newH;
+  _lastCanvasW = displayWidth;
+  _lastCanvasH = displayHeight;
+  _lastDpr = dpr;
 
-  canvasEl.width = newW;
-  canvasEl.height = newH;
-
+  /*
+   * setPixelRatio()が内部解像度を調整するため、
+   * setSize()にはCSS上の表示サイズを渡す。
+   */
   rendererEl.setPixelRatio(dpr);
-  rendererEl.setSize(newW, newH, false);
+  rendererEl.setSize(displayWidth, displayHeight, false);
 
-  cameraEl.aspect = newW / newH;
+  cameraEl.aspect = displayWidth / displayHeight;
   cameraEl.updateProjectionMatrix();
 
   canvasEl.style.width = "100%";
   canvasEl.style.height = "100%";
 }
+let lastVideoTime = -1;
 
 /**
  * メイン処理
@@ -134,38 +149,85 @@ async function main() {
     syncCanvasSizeToVideo(video, canvas, renderer, camera3d);
 
     try {
-      const results = flm.detectForVideo(video, performance.now());
-      if (results && results.faceLandmarks && results.faceLandmarks.length > 0) {
-        const lm = results.faceLandmarks[0];
-        const nose = lm[1];
-        const leftEye = lm[33];
-        const rightEye = lm[263];
+  if (
+    video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+    video.currentTime !== lastVideoTime
+  ) {
+    lastVideoTime = video.currentTime;
 
-        const lx = correctedX(leftEye.x, params.mirrored);
-        const rx = correctedX(rightEye.x, params.mirrored);
-        const faceWidthNorm = Math.abs(rx - lx);
+    const results = flm.detectForVideo(
+      video,
+      performance.now()
+    );
 
-        // 深度計算
-        const zDepth = calculateDepth(faceWidthNorm, params.depthFactor);
+    if (
+      results &&
+      results.faceLandmarks &&
+      results.faceLandmarks.length > 0
+    ) {
+      const lm = results.faceLandmarks[0];
+      const nose = lm[1];
+      const leftEye = lm[33];
+      const rightEye = lm[263];
 
-        // 位置計算
-        const adjNoseX = nose.x + params.xOffsetNorm;
-        const adjNoseY = nose.y + params.yOffsetNorm;
-        const worldPos = landmarkToWorld(adjNoseX, adjNoseY, zDepth, camera3d, params.mirrored);
-        plane.position.copy(worldPos);
+      const lx = correctedX(
+        leftEye.x,
+        params.mirrored
+      );
 
-        // 回転計算
-        plane.rotation.z = calculateRotationZ(leftEye, rightEye, params.mirrored);
+      const rx = correctedX(
+        rightEye.x,
+        params.mirrored
+      );
 
-        // スケール計算
-        const finalScale = Math.max(0.02, faceWidthNorm * params.baseScale);
-        plane.scale.set(finalScale, finalScale, 1);
+      const faceWidthNorm = Math.abs(rx - lx);
 
-        plane.visible = true;
-      }
-    } catch (e) {
-      console.error("renderLoop error", e);
-    }
+      const zDepth = calculateDepth(
+        faceWidthNorm,
+        params.depthFactor
+      );
+
+      const adjNoseX =
+        nose.x + params.xOffsetNorm;
+
+      const adjNoseY =
+        nose.y + params.yOffsetNorm;
+
+      const worldPos = landmarkToWorld(
+        adjNoseX,
+        adjNoseY,
+        zDepth,
+        camera3d,
+        params.mirrored
+      );
+
+      plane.position.copy(worldPos);
+
+      plane.rotation.z = calculateRotationZ(
+        leftEye,
+        rightEye,
+        params.mirrored
+      );
+
+      const finalScale = Math.max(
+        0.02,
+        faceWidthNorm * params.baseScale
+      );
+
+      plane.scale.set(
+        finalScale,
+        finalScale,
+        1
+      );
+
+      plane.visible = true;
+      } else {
+        plane.visible = false;
+      }    
+  }
+} catch (e) {
+  console.error("renderLoop error", e);
+}
 
     renderer.render(scene, camera3d);
     requestAnimationFrame(() => renderLoop(flm));
